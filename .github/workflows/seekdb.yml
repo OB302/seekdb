@@ -5,6 +5,15 @@ name: SeekDB CI
 on:
   workflow_call:
   workflow_dispatch:
+  push:
+    branches: [master, develop]
+    paths-ignore:
+      - 'docs/**'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/pull_request_template.md'
+      - 'README.md'
+      - 'README_CN.md'
+      - 'CONTRIBUTING.md'
   pull_request:
     branches: [master, develop]
     types: [opened, reopened, synchronize, ready_for_review]
@@ -176,6 +185,18 @@ jobs:
           export FORWARDING_HOST="${{ vars.FORWARDING_HOST || '' }}"
           export PATH="$GITHUB_WORKSPACE/deps/3rd/usr/local/oceanbase/devtools/bin:$PATH"
           .github/script/seekdb/compile.sh
+
+      - name: Build C++ unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          make -C build_release -j"$(nproc)" pretest
+
+      - name: Run C++ unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./build_release/unittest/run_tests.sh --output-on-failure -j "$(nproc)"
 
       - name: Publish master build caches
         if: >-
