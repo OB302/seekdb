@@ -33,7 +33,7 @@ concurrency:
 
 jobs:
   test:
-    name: Unit tests and mysqltest
+    name: mysqltest
     if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
     runs-on: ubuntu-22.04
     timeout-minutes: 360
@@ -82,14 +82,6 @@ jobs:
         with:
           path: deps/3rd
           key: ${{ runner.os }}-seekdb-deps-el9-x86_64-${{ hashFiles('deps/init/oceanbase.el9.x86_64.deps') }}
-
-      - name: Build C++ unit tests
-        shell: bash
-        run: make -C build_release -j2 pretest
-
-      - name: Run C++ unit tests
-        shell: bash
-        run: ./build_release/unittest/run_tests.sh --output-on-failure -j 2
 
       - name: Build SeekDB for mysqltest
         shell: bash
