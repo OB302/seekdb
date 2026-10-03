@@ -1,0 +1,12 @@
+# Single-file CSV table scan through SELECT.
+--let $csv_path = /tmp/seekdb_read_csv_single_file.csv
+--exec rm -f $csv_path
+
+eval SELECT CONCAT('1,"alice, A"', CHAR(10), '2,bob') INTO OUTFILE '$csv_path'
+  FIELDS TERMINATED BY ',' ESCAPED BY '' LINES TERMINATED BY '\n';
+
+eval SELECT id, name FROM read_csv('$csv_path') AS csv_data (id, name) ORDER BY id;
+eval SELECT name FROM read_csv('$csv_path') AS csv_data (id, name) ORDER BY name;
+eval SELECT name FROM read_csv('$csv_path') AS csv_data (id, name) WHERE id = '2';
+
+--exec rm -f $csv_path

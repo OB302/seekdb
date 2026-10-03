@@ -16,6 +16,7 @@
 
 #define USING_LOG_PREFIX  SQL_ENG
 
+#include <algorithm>
 #include "sql/engine/cmd/ob_load_data_file_reader.h"
 #include "rpc/obmysql/ob_i_cs_mem_pool.h"
 #include "rpc/obmysql/packet/ompk_local_infile.h"
@@ -149,6 +150,212 @@ int ObFileReader::readn(char *buffer, int64_t count, int64_t &read_size)
 }
 
 /**
+ * CsvScanReader
+ */
+CsvScanReader::CsvScanReader()
+    : reader_(NULL),
+      allocator_(NULL),
+      buffer_(NULL),
+      escape_buffer_(NULL),
+      buffer_size_(0),
+      buffer_begin_(0),
+      buffer_end_(0),
+      rows_to_skip_(0),
+      eof_(false),
+      is_inited_(false),
+      errors_()
+{
+}
+
+int CsvScanReader::init(ObFileReader &reader,
+                        const ObCSVGeneralFormat &format,
+                        ObIAllocator &allocator,
+                        int64_t buffer_size)
+{
+  int ret = OB_SUCCESS;
+  if (is_inited_) {
+    ret = OB_INIT_TWICE;
+  } else if (buffer_size <= 0 || buffer_size > MAX_RECORD_SIZE
+             || format.file_column_nums_ <= 0 || format.skip_header_lines_ < 0) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (OB_ISNULL(buffer_ = static_cast<char *>(allocator.alloc(buffer_size)))
+             || OB_ISNULL(escape_buffer_ = static_cast<char *>(allocator.alloc(buffer_size)))) {
+    ret = OB_ALLOCATE_MEMORY_FAILED;
+  } else if (OB_FAIL(parser_.init(format))) {
+  } else {
+    reader_ = &reader;
+    allocator_ = &allocator;
+    buffer_size_ = buffer_size;
+    buffer_begin_ = 0;
+    buffer_end_ = 0;
+    rows_to_skip_ = format.skip_header_lines_;
+    eof_ = reader.eof();
+    is_inited_ = true;
+  }
+  return ret;
+}
+
+int CsvScanReader::get_next_row(ObIArray<ObCSVGeneralParser::FieldValue> &fields)
+{
+  int ret = OB_SUCCESS;
+  fields.reuse();
+  if (!is_inited_ || OB_ISNULL(reader_) || OB_ISNULL(buffer_) || OB_ISNULL(escape_buffer_)) {
+    ret = OB_NOT_INIT;
+  }
+
+  struct NoopLineHandler
+  {
+    int operator()(ObCSVGeneralParser::HandleOneLineParam param)
+    {
+      UNUSED(param);
+      return OB_SUCCESS;
+    }
+    int operator()(ObCSVGeneralParser::HandleBatchLinesParam param)
+    {
+      UNUSED(param);
+      return OB_SUCCESS;
+    }
+  };
+
+  bool row_ready = false;
+  while (OB_SUCC(ret) && !row_ready) {
+    if (buffer_begin_ < buffer_end_) {
+      const char *parse_pos = buffer_ + buffer_begin_;
+      const char *buffer_end = buffer_ + buffer_end_;
+      const int64_t row_limit = 1;
+      int64_t row_count = row_limit;
+      errors_.reuse();
+      NoopLineHandler handler;
+      if (OB_FAIL(parser_.scan<NoopLineHandler, true>(parse_pos,
+                                                       buffer_end,
+                                                       row_count,
+                                                       escape_buffer_,
+                                                       escape_buffer_ + buffer_size_,
+                                                       handler,
+                                                       errors_,
+                                                       eof_))) {
+      } else if (errors_.count() > 0) {
+        ret = errors_.at(0).err_code;
+      } else {
+        buffer_begin_ = parse_pos - buffer_;
+        if (row_count > 0) {
+          const ObIArray<ObCSVGeneralParser::FieldValue> &parsed = parser_.get_fields_per_line();
+          if (rows_to_skip_ > 0) {
+            --rows_to_skip_;
+          } else {
+            for (int64_t i = 0; OB_SUCC(ret) && i < parsed.count(); ++i) {
+              if (OB_FAIL(fields.push_back(parsed.at(i)))) {
+              }
+            }
+            row_ready = OB_SUCC(ret);
+          }
+        } else if (eof_ && buffer_begin_ == buffer_end_) {
+          ret = OB_ITER_END;
+        }
+      }
+    } else if (eof_) {
+      ret = OB_ITER_END;
+    }
+
+    if (OB_SUCC(ret) && !row_ready) {
+      if (OB_FAIL(compact_and_fill())) {
+      }
+    }
+  }
+  return ret;
+}
+
+int CsvScanReader::compact_and_fill()
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(reader_) || OB_ISNULL(buffer_) || OB_ISNULL(allocator_)) {
+    ret = OB_NOT_INIT;
+  } else {
+    const int64_t remain = buffer_end_ - buffer_begin_;
+    if (remain > 0 && buffer_begin_ > 0) {
+      MEMMOVE(buffer_, buffer_ + buffer_begin_, remain);
+    }
+    buffer_begin_ = 0;
+    buffer_end_ = remain;
+    if (buffer_end_ == buffer_size_ && OB_FAIL(grow_buffer())) {
+    } else if (!eof_) {
+      int64_t read_size = 0;
+      while (OB_SUCC(ret) && 0 == read_size && !eof_) {
+        if (OB_FAIL(reader_->read(buffer_ + buffer_end_, buffer_size_ - buffer_end_, read_size))) {
+        } else if (read_size < 0 || read_size > buffer_size_ - buffer_end_) {
+          ret = OB_ERR_UNEXPECTED;
+        } else {
+          eof_ = reader_->eof();
+        }
+      }
+      if (OB_SUCC(ret)) {
+        buffer_end_ += read_size;
+      }
+    }
+  }
+  return ret;
+}
+
+int CsvScanReader::grow_buffer()
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(allocator_) || OB_ISNULL(buffer_) || OB_ISNULL(escape_buffer_)) {
+    ret = OB_NOT_INIT;
+  } else if (buffer_size_ >= MAX_RECORD_SIZE) {
+    ret = OB_SIZE_OVERFLOW;
+  } else {
+    const int64_t new_size = std::min(MAX_RECORD_SIZE, buffer_size_ * 2);
+    char *new_buffer = NULL;
+    char *new_escape_buffer = NULL;
+    if (OB_ISNULL(new_buffer = static_cast<char *>(allocator_->alloc(new_size)))
+        || OB_ISNULL(new_escape_buffer = static_cast<char *>(allocator_->alloc(new_size)))) {
+      ret = OB_ALLOCATE_MEMORY_FAILED;
+    } else {
+      if (buffer_end_ > 0) {
+        MEMCPY(new_buffer, buffer_, buffer_end_);
+      }
+      buffer_ = new_buffer;
+      escape_buffer_ = new_escape_buffer;
+      buffer_size_ = new_size;
+    }
+  }
+  return ret;
+}
+
+int CsvScanReader::rescan()
+{
+  int ret = OB_SUCCESS;
+  if (!is_inited_ || OB_ISNULL(reader_)) {
+    ret = OB_NOT_INIT;
+  } else if (!reader_->seekable()) {
+    ret = OB_NOT_SUPPORTED;
+  } else if (OB_FAIL(reader_->seek(0))) {
+  } else {
+    buffer_begin_ = 0;
+    buffer_end_ = 0;
+    rows_to_skip_ = parser_.get_format().skip_header_lines_;
+    eof_ = reader_->eof();
+    errors_.reuse();
+  }
+  return ret;
+}
+
+void CsvScanReader::reset()
+{
+  reader_ = NULL;
+  allocator_ = NULL;
+  buffer_ = NULL;
+  escape_buffer_ = NULL;
+  buffer_size_ = 0;
+  buffer_begin_ = 0;
+  buffer_end_ = 0;
+  rows_to_skip_ = 0;
+  eof_ = false;
+  is_inited_ = false;
+  errors_.reuse();
+}
+
+/**
  * ObRandomFileReader
  */
 
@@ -195,8 +402,16 @@ int ObRandomFileReader::read(char *buf, int64_t count, int64_t &read_size)
 
 int ObRandomFileReader::seek(int64_t offset)
 {
-  offset_ = offset;
-  return OB_SUCCESS;
+  int ret = OB_SUCCESS;
+  if (offset < 0) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (!is_inited_) {
+    ret = OB_NOT_INIT;
+  } else {
+    offset_ = offset;
+    eof_ = false;
+  }
+  return ret;
 }
 
 int ObRandomFileReader::get_file_size(int64_t &file_size)

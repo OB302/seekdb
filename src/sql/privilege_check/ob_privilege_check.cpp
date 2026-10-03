@@ -17,6 +17,7 @@
 #define USING_LOG_PREFIX SQL_SESSION
 #include "sql/privilege_check/ob_privilege_check.h"
 #include "sql/resolver/cmd/ob_load_data_stmt.h"
+#include "sql/resolver/dml/ob_dml_stmt.h"
 
 #include "sql/resolver/ddl/ob_create_table_stmt.h"
 #include "sql/resolver/ddl/ob_create_database_stmt.h"
@@ -300,6 +301,17 @@ int get_dml_stmt_need_privs(
           // Now most show statements filter out information that the user does not have permission to see
           break;
         }
+        bool need_file_priv = select_stmt->is_select_into_outfile();
+        for (int64_t i = 0; !need_file_priv && i < select_stmt->get_table_size(); ++i) {
+          const TableItem *table_item = select_stmt->get_table_item(i);
+          need_file_priv = OB_NOT_NULL(table_item) && table_item->is_csv_file_table_;
+        }
+        if (need_file_priv) {
+          ObNeedPriv need_priv;
+          need_priv.priv_set_ = OB_PRIV_FILE;
+          need_priv.priv_level_ = OB_PRIV_USER_LEVEL;
+          ADD_NEED_PRIV(need_priv);
+        }
       }//fall through for non-show select
       case stmt::T_INSERT :
       case stmt::T_REPLACE :
@@ -310,12 +322,6 @@ int get_dml_stmt_need_privs(
         if (stmt::T_SELECT == stmt_type) {
           priv_set = OB_PRIV_SELECT;
           op_literal = ObString::make_string("SELECT");
-          if (static_cast<const ObSelectStmt*>(basic_stmt)->is_select_into_outfile()) {
-            ObNeedPriv need_priv;
-            need_priv.priv_set_ = OB_PRIV_FILE;
-            need_priv.priv_level_ = OB_PRIV_USER_LEVEL;
-            ADD_NEED_PRIV(need_priv);
-          }
         } else if (stmt::T_INSERT == stmt_type) {
           priv_set = OB_PRIV_INSERT;
           op_literal = ObString::make_string("INSERT");

@@ -1,0 +1,13 @@
+SELECT CONCAT('1,"alice, A"', CHAR(10), '2,bob') INTO OUTFILE '/tmp/seekdb_read_csv_single_file.csv'
+  FIELDS TERMINATED BY ',' ESCAPED BY '' LINES TERMINATED BY '\n';
+SELECT id, name FROM read_csv('/tmp/seekdb_read_csv_single_file.csv') AS csv_data (id, name) ORDER BY id;
+id	name
+1	alice, A
+2	bob
+SELECT name FROM read_csv('/tmp/seekdb_read_csv_single_file.csv') AS csv_data (id, name) ORDER BY name;
+name
+alice, A
+bob
+SELECT name FROM read_csv('/tmp/seekdb_read_csv_single_file.csv') AS csv_data (id, name) WHERE id = '2';
+name
+bob

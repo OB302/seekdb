@@ -5494,7 +5494,8 @@ int ObStaticEngineCG::generate_spec(ObLogFunctionTable &op, ObFunctionTableSpec 
   int ret = OB_SUCCESS;
   if (OB_ISNULL(op.get_stmt())) {
     ret = OB_ERR_UNEXPECTED;
-  } else if (OB_FAIL(spec.column_exprs_.init(op.get_stmt()->get_column_size()))) {
+  } else if (OB_FAIL(spec.column_exprs_.init(op.get_stmt()->get_column_size()))
+             || OB_FAIL(spec.csv_column_indexes_.init(op.get_stmt()->get_column_size()))) {
   } else if (OB_UNLIKELY(op.get_num_of_child() > 1)) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_ISNULL(value_raw_expr = op.get_value_expr())) {
@@ -5502,6 +5503,8 @@ int ObStaticEngineCG::generate_spec(ObLogFunctionTable &op, ObFunctionTableSpec 
   } else if (OB_FAIL(generate_rt_expr(*value_raw_expr, value_expr))) {
   } else {
     spec.has_correlated_expr_ = value_raw_expr->has_flag(CNT_DYNAMIC_PARAM);
+    spec.is_csv_file_table_ = op.is_csv_file_table();
+    spec.csv_column_count_ = op.get_csv_column_count();
     spec.value_expr_ = value_expr;
     for (int64_t i = 0; OB_SUCC(ret) && i < op.get_output_exprs().count(); ++i) {
       if (OB_FAIL(mark_expr_self_produced(op.get_output_exprs().at(i)))) {
@@ -5518,6 +5521,14 @@ int ObStaticEngineCG::generate_spec(ObLogFunctionTable &op, ObFunctionTableSpec 
         OZ (mark_expr_self_produced(col_item->expr_));
         OZ (generate_rt_expr(*col_item->expr_, rt_expr));
         OZ (spec.column_exprs_.push_back(rt_expr));
+        if (op.is_csv_file_table()) {
+          if (col_item->column_id_ < OB_APP_MIN_COLUMN_ID
+              || col_item->column_id_ - OB_APP_MIN_COLUMN_ID >= op.get_csv_column_count()) {
+            ret = OB_ERR_UNEXPECTED;
+          } else if (OB_FAIL(spec.csv_column_indexes_.push_back(
+                       static_cast<int64_t>(col_item->column_id_ - OB_APP_MIN_COLUMN_ID)))) {
+          }
+        }
       }
     }
   }

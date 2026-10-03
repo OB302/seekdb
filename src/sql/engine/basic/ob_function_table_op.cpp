@@ -27,7 +27,8 @@ using namespace common;
 namespace sql
 {
 
-OB_SERIALIZE_MEMBER((ObFunctionTableSpec, ObOpSpec), value_expr_, column_exprs_, has_correlated_expr_);
+OB_SERIALIZE_MEMBER((ObFunctionTableSpec, ObOpSpec), value_expr_, column_exprs_, has_correlated_expr_,
+                    is_csv_file_table_, csv_column_count_, csv_column_indexes_);
 
 int ObFunctionTableOp::inner_open()
 {
@@ -36,6 +37,10 @@ int ObFunctionTableOp::inner_open()
   already_calc_ = false;
   if (OB_ISNULL(MY_SPEC.value_expr_)) {
     ret = OB_ERR_UNEXPECTED;
+  } else if (MY_SPEC.is_csv_file_table_) {
+    next_row_func_ = &ObFunctionTableOp::inner_get_next_row_csv_file;
+    if (OB_FAIL(open_csv_file_table())) {
+    }
   } else if (ObExtendType == MY_SPEC.value_expr_->datum_meta_.type_) {
     next_row_func_ = &ObFunctionTableOp::inner_get_next_row_udf;
   } else {
@@ -48,6 +53,8 @@ int ObFunctionTableOp::inner_rescan()
 {
   int ret = OB_SUCCESS;
   if (OB_FAIL(ObOperator::inner_rescan())) {
+  } else if (MY_SPEC.is_csv_file_table_) {
+    ret = csv_reader_.rescan();
   } else {
     node_idx_ = 0;
     if (MY_SPEC.has_correlated_expr_) {
@@ -67,12 +74,89 @@ int ObFunctionTableOp::inner_close()
   row_count_ = 0;
   col_count_ = 0;
   value_table_ = NULL;
+  csv_reader_.reset();
+  if (OB_NOT_NULL(file_reader_)) {
+    ObFileReader::destroy(file_reader_);
+    file_reader_ = NULL;
+  }
   return ret;
 }
 
 void ObFunctionTableOp::destroy()
 {
+  csv_reader_.reset();
+  if (OB_NOT_NULL(file_reader_)) {
+    ObFileReader::destroy(file_reader_);
+    file_reader_ = NULL;
+  }
   ObOperator::destroy();
+}
+
+int ObFunctionTableOp::open_csv_file_table()
+{
+  int ret = OB_SUCCESS;
+  ObDatum *path_datum = NULL;
+  ObString path;
+  ObFileReadParam read_param;
+  ObCSVGeneralFormat format;
+  if (OB_FAIL(MY_SPEC.value_expr_->eval(eval_ctx_, path_datum))) {
+  } else if (OB_ISNULL(path_datum) || path_datum->is_null()) {
+    ret = OB_INVALID_ARGUMENT;
+  } else if (OB_FAIL(ctx_.check_status())) {
+  } else {
+    path = path_datum->get_string();
+    if (path.empty() || MY_SPEC.csv_column_count_ <= 0
+        || MY_SPEC.csv_column_indexes_.count() != MY_SPEC.column_exprs_.count()) {
+      ret = OB_INVALID_ARGUMENT;
+    } else {
+      read_param.file_location_ = ObLoadFileLocation::SERVER_DISK;
+      read_param.filename_ = path;
+      read_param.compression_format_ = ObCSVGeneralFormat::ObCSVCompression::NONE;
+      if (OB_FAIL(ObFileReader::open(read_param, ctx_.get_allocator(), file_reader_))) {
+      } else {
+        format.line_term_str_ = ObString::make_string("\n");
+        format.field_term_str_ = ObString::make_string(",");
+        format.field_enclosed_char_ = '"';
+        format.field_escaped_char_ = '"';
+        format.cs_type_ = common::CHARSET_UTF8MB4;
+        format.file_column_nums_ = MY_SPEC.csv_column_count_;
+        if (OB_FAIL(csv_reader_.init(*file_reader_, format, ctx_.get_allocator()))) {
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+int ObFunctionTableOp::inner_get_next_row_csv_file()
+{
+  int ret = OB_SUCCESS;
+  clear_evaluated_flag();
+  csv_fields_.reuse();
+  if (OB_FAIL(ctx_.check_status())) {
+  } else if (OB_FAIL(csv_reader_.get_next_row(csv_fields_))) {
+  } else if (OB_UNLIKELY(csv_fields_.count() != MY_SPEC.csv_column_count_
+                         || MY_SPEC.csv_column_indexes_.count() != MY_SPEC.column_exprs_.count())) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    for (int64_t i = 0; OB_SUCC(ret) && i < MY_SPEC.column_exprs_.count(); ++i) {
+      ObExpr *column_expr = MY_SPEC.column_exprs_.at(i);
+      const int64_t csv_column_idx = MY_SPEC.csv_column_indexes_.at(i);
+      if (OB_ISNULL(column_expr) || csv_column_idx < 0 || csv_column_idx >= csv_fields_.count()) {
+        ret = OB_ERR_UNEXPECTED;
+      } else {
+        const ObCSVGeneralParser::FieldValue &field = csv_fields_.at(csv_column_idx);
+        ObDatum &datum = column_expr->locate_datum_for_write(eval_ctx_);
+        if (field.is_null_) {
+          datum.set_null();
+        } else {
+          datum.set_string(field.ptr_, static_cast<uint32_t>(field.len_));
+        }
+        column_expr->set_evaluated_projected(eval_ctx_);
+      }
+    }
+  }
+  return ret;
 }
 
 

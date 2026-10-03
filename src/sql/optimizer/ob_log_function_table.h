@@ -29,10 +29,16 @@ public:
       : ObLogicalOperator(plan),
         table_id_(OB_INVALID_ID),
         value_expr_(NULL),
+        is_csv_file_table_(false),
+        csv_column_count_(0),
         table_name_(),
         access_exprs_() { }
   virtual ~ObLogFunctionTable() {}
   void add_values_expr(ObRawExpr* expr) { value_expr_ = expr; }
+  void set_csv_file_table(bool is_csv_file_table) { is_csv_file_table_ = is_csv_file_table; }
+  bool is_csv_file_table() const { return is_csv_file_table_; }
+  void set_csv_column_count(int64_t column_count) { csv_column_count_ = column_count; }
+  int64_t get_csv_column_count() const { return csv_column_count_; }
   const ObRawExpr* get_value_expr() const { return value_expr_; }
   ObRawExpr* get_value_expr() { return value_expr_; }
   virtual uint64_t hash(uint64_t seed) const override;
@@ -54,6 +60,8 @@ public:
 private:
   uint64_t table_id_;
   ObRawExpr* value_expr_;
+  bool is_csv_file_table_;
+  int64_t csv_column_count_;
   common::ObString table_name_;
   common::ObSEArray<ObRawExpr*, 4, common::ModulePageAllocator, true> access_exprs_;
   DISALLOW_COPY_AND_ASSIGN(ObLogFunctionTable);

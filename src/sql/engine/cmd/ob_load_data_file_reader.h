@@ -109,6 +109,43 @@ protected:
   ObIAllocator &allocator_;
 };
 
+// Streaming adapter for the existing CSV parser. The returned FieldValue
+// buffers remain valid until the next call to get_next_row(). The underlying
+// ObFileReader is borrowed and must outlive this object.
+class CsvScanReader
+{
+public:
+  static const int64_t DEFAULT_BUFFER_SIZE = 64L * 1024L;
+  static const int64_t MAX_RECORD_SIZE = 64L * 1024L * 1024L;
+
+  CsvScanReader();
+  int init(ObFileReader &reader,
+           const ObCSVGeneralFormat &format,
+           ObIAllocator &allocator,
+           int64_t buffer_size = DEFAULT_BUFFER_SIZE);
+  int get_next_row(common::ObIArray<ObCSVGeneralParser::FieldValue> &fields);
+  int rescan();
+  void reset();
+
+private:
+  int compact_and_fill();
+  int grow_buffer();
+
+private:
+  ObFileReader *reader_;
+  ObCSVGeneralParser parser_;
+  ObIAllocator *allocator_;
+  char *buffer_;
+  char *escape_buffer_;
+  int64_t buffer_size_;
+  int64_t buffer_begin_;
+  int64_t buffer_end_;
+  int64_t rows_to_skip_;
+  bool eof_;
+  bool is_inited_;
+  common::ObSEArray<ObCSVGeneralParser::LineErrRec, 4> errors_;
+};
+
 /**
  * Stream file that can read sequential only
  */

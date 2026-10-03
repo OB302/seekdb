@@ -150,6 +150,8 @@ struct TableItem
     snapshot_query_expr_ = nullptr;
     snapshot_query_type_ = SnapshotQueryType::NOT_USING;
     function_table_expr_ = nullptr;
+    is_csv_file_table_ = false;
+    csv_column_count_ = 0;
     ddl_schema_version_ = 0;
     ddl_table_id_ = common::OB_INVALID_ID;
     json_table_def_ = nullptr;
@@ -293,6 +295,8 @@ struct TableItem
   ObRawExpr *snapshot_query_expr_;
   SnapshotQueryType snapshot_query_type_;
   ObRawExpr *function_table_expr_;
+  bool is_csv_file_table_;
+  int64_t csv_column_count_;
   int64_t ddl_schema_version_;
   int64_t ddl_table_id_;
   // table partition

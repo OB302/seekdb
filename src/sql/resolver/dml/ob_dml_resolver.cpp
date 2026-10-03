@@ -15,6 +15,7 @@
  */
 
 #define USING_LOG_PREFIX SQL_RESV
+#include <stdlib.h>
 #include "ob_dml_resolver.h"
 #include "sql/resolver/dml/ob_view_table_resolver.h"
 #include "sql/optimizer/ob_optimizer_util.h"
@@ -3931,8 +3932,10 @@ int ObDMLResolver::resolve_function_table_item(const ParseNode &parse_tree,
   ObRawExpr *function_table_expr = NULL;
   TableItem *item = NULL;
   ObString alias_name;
+  const ParseNode *column_list = NULL;
+  const bool is_csv_file_table = 3 == parse_tree.num_child_;
   CK (OB_LIKELY(T_TABLE_COLLECTION_EXPRESSION == parse_tree.type_));
-  CK (OB_LIKELY(2 == parse_tree.num_child_));
+  CK (OB_LIKELY(2 == parse_tree.num_child_ || is_csv_file_table));
   CK (OB_NOT_NULL(parse_tree.children_[0]));
   if (OB_SUCC(ret) && (OB_ISNULL(stmt) || OB_ISNULL(allocator_))) {
     ret = OB_NOT_INIT;
@@ -3943,9 +3946,48 @@ int ObDMLResolver::resolve_function_table_item(const ParseNode &parse_tree,
     OX (params_.is_resolve_table_function_expr_ = false);
     CK (OB_NOT_NULL(function_table_expr));
     OX (alias_node = parse_tree.children_[1]);
+    if (is_csv_file_table) {
+      CK (OB_NOT_NULL(column_list = parse_tree.children_[2]));
+      CK (T_COLUMN_LIST == column_list->type_ && column_list->num_child_ > 0);
+    }
   }
   CK (OB_NOT_NULL(function_table_expr));
   OZ (function_table_expr->deduce_type(session_info_));
+  if (OB_SUCC(ret) && is_csv_file_table) {
+    ObString secure_file_priv;
+    ObString file_path;
+    ObString canonical_path;
+    ObCStringHelper helper;
+    char full_path_buf[DEFAULT_BUF_LENGTH] = {0};
+    char input_path_buf[DEFAULT_BUF_LENGTH] = {0};
+    char *actual_path = NULL;
+    if (ObRawExpr::EXPR_CONST != function_table_expr->get_expr_class()
+        || !function_table_expr->get_result_type().is_string_type()) {
+      ret = OB_INVALID_ARGUMENT;
+    } else {
+      const ObConstRawExpr *path_expr = static_cast<const ObConstRawExpr *>(function_table_expr);
+      file_path = path_expr->get_value().get_string();
+      if (file_path.empty() || file_path.length() >= DEFAULT_BUF_LENGTH) {
+        ret = OB_INVALID_ARGUMENT;
+      } else {
+        MEMCPY(input_path_buf, file_path.ptr(), file_path.length());
+#ifdef _WIN32
+        if (OB_ISNULL(actual_path = ::_fullpath(full_path_buf, helper.convert(ObString(file_path.length(), input_path_buf)), sizeof(full_path_buf)))) {
+#else
+        if (OB_ISNULL(actual_path = ::realpath(input_path_buf, full_path_buf))) {
+#endif
+          ret = OB_FILE_NOT_EXIST;
+        } else if (OB_FAIL(session_info_->get_secure_file_priv(secure_file_priv))) {
+        } else if (!session_info_->is_inner()
+                   && OB_FAIL(ObResolverUtils::check_secure_path(secure_file_priv, ObString(actual_path)))) {
+        } else if (OB_FAIL(ob_write_string(*allocator_, ObString(actual_path), canonical_path, true))) {
+        } else {
+          ObConstRawExpr *path_expr = static_cast<ObConstRawExpr *>(function_table_expr);
+          path_expr->get_value().set_varchar(canonical_path);
+        }
+      }
+    }
+  }
   if (OB_SUCC(ret)) {
     if (function_table_expr->get_result_type().is_ext()) {
       // PL collection used in TABLE(), extract PL info from schema
@@ -3990,6 +4032,8 @@ int ObDMLResolver::resolve_function_table_item(const ParseNode &parse_tree,
     OX (item->table_id_ = generate_table_id());
     OX (item->type_ = TableItem::FUNCTION_TABLE);
     OX (item->function_table_expr_ = function_table_expr);
+    OX (item->is_csv_file_table_ = is_csv_file_table);
+    OX (item->csv_column_count_ = is_csv_file_table ? column_list->num_child_ : 0);
 
     if (OB_SUCC(ret) && function_table_expr->is_udf_expr()) {
       ObUDFRawExpr *udf = static_cast<ObUDFRawExpr*>(function_table_expr);
@@ -4025,7 +4069,38 @@ int ObDMLResolver::resolve_function_table_item(const ParseNode &parse_tree,
     // ObFunctionTable fills row data when it depends on the columns before row being the output columns of udf, here we force to add udf's output columns to ObFunctionTable
     ObSEArray<ColumnItem, 16> col_items;
     CK (OB_NOT_NULL(item));
-    OZ (resolve_function_table_column_item(*item, col_items));
+    if (is_csv_file_table) {
+      ObObjMeta meta;
+      ObAccuracy accuracy = ObAccuracy::MAX_ACCURACY[ObVarcharType];
+      meta.set_type(ObVarcharType);
+      meta.set_collation_type(ObCharset::get_default_collation(ObCharset::get_default_charset()));
+      for (int64_t i = 0; OB_SUCC(ret) && i < column_list->num_child_; ++i) {
+        ParseNode *column_node = column_list->children_[i];
+        ColumnItem *column_item = NULL;
+        ObString column_name;
+        if (OB_ISNULL(column_node) || T_IDENT != column_node->type_) {
+          ret = OB_ERR_UNEXPECTED;
+        } else {
+          column_name.assign_ptr(column_node->str_value_, column_node->str_len_);
+          for (int64_t j = 0; OB_SUCC(ret) && j < i; ++j) {
+            ParseNode *previous_node = column_list->children_[j];
+            if (OB_ISNULL(previous_node)) {
+              ret = OB_ERR_UNEXPECTED;
+            } else if (ObCharset::case_insensitive_equal(column_name,
+                      ObString(previous_node->str_len_, previous_node->str_value_))) {
+              ret = OB_ERR_COLUMN_DUPLICATE;
+              LOG_USER_ERROR(OB_ERR_COLUMN_DUPLICATE, column_name.length(), column_name.ptr());
+            }
+          }
+          if (OB_SUCC(ret)) {
+            OZ (resolve_function_table_column_item(*item, meta, accuracy, column_name,
+                                                   OB_APP_MIN_COLUMN_ID + i, column_item));
+          }
+        }
+      }
+    } else {
+      OZ (resolve_function_table_column_item(*item, col_items));
+    }
   }
   OX (tbl_item = item);
   return ret;
